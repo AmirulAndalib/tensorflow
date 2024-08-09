@@ -61,18 +61,18 @@ limitations under the License.
 #include "xla/service/gpu/autotuning/autotuner_util.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/buffer_comparator.h"
-#include "xla/service/gpu/cudnn_fusion_compiler.h"
-#include "xla/service/gpu/fusion_wrapper.h"
-#include "xla/service/gpu/gemm_rewriter.h"
 #include "xla/service/gpu/gpu_float_support.h"
 #include "xla/service/gpu/hlo_traversal.h"
-#include "xla/service/gpu/instruction_fusion.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/gpu/matmul_utils.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
-#include "xla/service/gpu/priority_fusion.h"
 #include "xla/service/gpu/split_k_gemm_rewriter.h"
 #include "xla/service/gpu/stream_executor_util.h"
+#include "xla/service/gpu/transforms/cudnn_fusion_compiler.h"
+#include "xla/service/gpu/transforms/fusion_wrapper.h"
+#include "xla/service/gpu/transforms/gemm_rewriter.h"
+#include "xla/service/gpu/transforms/instruction_fusion.h"
+#include "xla/service/gpu/transforms/priority_fusion.h"
 #include "xla/service/hlo_module_config.h"
 #include "xla/service/shaped_buffer.h"
 #include "xla/shape.h"
@@ -347,10 +347,13 @@ absl::StatusOr<std::unique_ptr<HloModule>> TritonGemmAutotuneExtractor(
 
   if (config.split_k > 1) {
     TF_RETURN_IF_ERROR(MakeDotSplitKBatch(cloned_dot_fusion, config));
-    GpuFloatSupport bf16_support(gpu_device_info.cuda_compute_capability(),
-                                 BF16);
-    FloatNormalization float_normalization(&bf16_support);
-    TF_RETURN_IF_ERROR(float_normalization.Run(new_module.get()).status());
+    for (PrimitiveType type :
+         {BF16, F8E5M2, F8E4M3FN, F8E4M3B11FNUZ, F8E5M2FNUZ, F8E4M3FNUZ}) {
+      GpuFloatSupport float_support(gpu_device_info.cuda_compute_capability(),
+                                    type);
+      FloatNormalization float_normalization(&float_support);
+      TF_RETURN_IF_ERROR(float_normalization.Run(new_module.get()).status());
+    }
 
     auto shape_size_function = [&](const Shape& shape) {
       // The real pointer size is set in GpuCompiler. In HloCostAnalysis, the
@@ -360,7 +363,7 @@ absl::StatusOr<std::unique_ptr<HloModule>> TritonGemmAutotuneExtractor(
       constexpr int64_t kPointerSize = 8;
       return ShapeUtil::ByteSizeOf(shape, kPointerSize);
     };
-    GpuPriorityFusion priority_fusion(
+    PriorityFusion priority_fusion(
         /*thread_pool=*/nullptr, gpu_device_info,
         GpuHloCostAnalysis::Options{/*shape_size=*/shape_size_function,
                                     /*per_second_rates=*/{},
@@ -484,6 +487,15 @@ absl::Status DumpOriginalFusion(AutotunerCompileUtil& util,
   // Using the original module for its debug info and name in the first
   // parameter. It's better to include the name of both the original module
   // and the extracted module, to avoid name clashes.
+  std::string rendered_graph_name =
+      absl::StrCat("gemm_fusion_", fusion_id, ".", module->name(), ".dot");
+  std::string rendered_graph = RenderGraph(rendered_graph_name, *module,
+                                           RenderedGraphFormat::kDot, true);
+  DumpToFileInDir(
+      /*module=*/*fusion.GetModule(),
+      /*file_prefix=*/"",
+      /*file_suffix=*/rendered_graph_name,
+      /*contents=*/rendered_graph);
   DumpToFileInDirOrStdout(
       /*module=*/*fusion.GetModule(),
       /*file_prefix=*/"",

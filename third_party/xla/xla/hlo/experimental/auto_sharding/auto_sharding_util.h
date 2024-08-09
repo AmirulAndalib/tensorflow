@@ -48,7 +48,6 @@ limitations under the License.
 namespace xla {
 namespace spmd {
 
-inline constexpr absl::string_view kPipelineMarker = "xla_pipeline_marker";
 inline constexpr absl::string_view kIdentityMarker = "identity";
 
 inline constexpr int64_t kAutoShardingPointerSize = 8;
@@ -211,11 +210,6 @@ inline void ReplaceOperand(HloInstruction* inst,
   }
 }
 
-// Return whether this instruction is a custom call marker introduced by us.
-inline bool IsCustomCallMarker(const HloInstruction* inst) {
-  return inst->IsCustomCall({kPipelineMarker, kIdentityMarker});
-}
-
 // Return whether this instruction is a TopK custom call.
 inline bool IsTopKCustomCall(const HloInstruction* inst) {
   return inst->opcode() == HloOpcode::kCustomCall &&
@@ -228,70 +222,6 @@ inline bool IsPartialReduceCustomCall(const HloInstruction* inst) {
          inst->custom_call_target() == "PartialReduce";
 }
 
-// Pass through the custom call marker and get the source instruction
-inline const HloInstruction* PassThroughCustomCallMarkerGetSource(
-    const HloInstruction* ins) {
-  while (ins->opcode() == HloOpcode::kGetTupleElement &&
-         IsCustomCallMarker(ins->operand(0))) {
-    const HloInstruction* custom_call = ins->operand(0);
-    const HloInstruction* tuple = custom_call->operand(0);
-    while (IsCustomCallMarker(tuple)) {
-      tuple = tuple->operand(0);
-    }
-    ins = tuple->operand(ins->tuple_index());
-  }
-  return ins;
-}
-
-// Pass through the custom call marker and get the acutal operand.
-inline HloInstruction* PassThroughCustomCallMarkerOperand(
-    HloInstruction* raw_operand, const HloInstruction* inst) {
-  if (!IsCustomCallMarker(raw_operand)) {
-    return raw_operand;
-  }
-
-  CHECK_EQ(inst->opcode(), HloOpcode::kGetTupleElement);
-
-  int index = inst->tuple_index();
-  return raw_operand->mutable_operand(0)->mutable_operand(index);
-}
-
-// Return whether the tuple is only used by a custom call marker.
-inline bool IsCustomCallMarkerTuple(const HloInstruction* inst) {
-  return inst->opcode() == HloOpcode::kTuple && inst->users().size() == 1 &&
-         IsCustomCallMarker(inst->users().front());
-}
-
-// Pass through the custom call marker and get the actual user.
-inline HloInstruction* PassThroughCustomCallMarkerUser(
-    HloInstruction* raw_user, const HloInstruction* inst) {
-  if (!IsCustomCallMarkerTuple(raw_user)) {
-    return raw_user;
-  }
-
-  const HloInstruction* custom_call = raw_user->users().front();
-
-  int index = -1;
-  for (int i = 0; i < raw_user->operand_count(); i++) {
-    if (raw_user->operand(i) == inst) {
-      index = i;
-      break;
-    }
-  }
-  CHECK_NE(index, -1);
-
-  HloInstruction* ret = nullptr;
-  for (HloInstruction* user : custom_call->users()) {
-    CHECK_EQ(user->opcode(), HloOpcode::kGetTupleElement);
-    if (user->tuple_index() == index) {
-      CHECK_EQ(ret, nullptr);
-      ret = user;
-    }
-  }
-
-  return ret == nullptr ? raw_user : ret;
-}
-
 // Return the users of an instruction and its alias,
 // excluding the final output tuple.
 inline InstructionSet UsersWithAlias(const HloInstruction* inst,
@@ -299,8 +229,7 @@ inline InstructionSet UsersWithAlias(const HloInstruction* inst,
                                      const HloInstruction* output) {
   InstructionSet users;
   for (HloInstruction* user : inst->users()) {
-    HloInstruction* pass_through_user =
-        PassThroughCustomCallMarkerUser(user, inst);
+    HloInstruction* pass_through_user = user;
     if (pass_through_user == output) {
       continue;
     }
@@ -310,8 +239,7 @@ inline InstructionSet UsersWithAlias(const HloInstruction* inst,
   auto iter = alias_map.find(inst);
   if (iter != alias_map.end()) {
     for (HloInstruction* user : iter->second->users()) {
-      HloInstruction* pass_through_user =
-          PassThroughCustomCallMarkerUser(user, iter->second);
+      HloInstruction* pass_through_user = user;
       if (pass_through_user == output) {
         continue;
       }
