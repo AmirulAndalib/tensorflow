@@ -473,7 +473,7 @@ absl::StatusOr<std::vector<Literal>> HloTestBase::ExecuteReplicated(
 absl::StatusOr<std::vector<Literal>> HloTestBase::ExecuteReplicated(
     std::unique_ptr<HloModule> module,
     std::vector<std::vector<Literal*>> arguments, int64_t num_replicas,
-    bool run_hlo_passes) {
+    bool run_hlo_passes, DeviceAssignment* device_assignment) {
   CHECK(num_replicas > 0 && "expect at least one replica");
   CHECK(num_replicas == arguments.size() &&
         "expect arguments for each replica");
@@ -489,8 +489,7 @@ absl::StatusOr<std::vector<Literal>> HloTestBase::ExecuteReplicated(
       [&](int64_t replica_idx, int64_t argument_idx) -> const Literal* {
         return arguments[replica_idx][argument_idx];
       },
-      num_replicas, /*run_hlo_passes=*/run_hlo_passes,
-      /*device_assignment=*/nullptr);
+      num_replicas, run_hlo_passes, device_assignment);
 }
 
 absl::StatusOr<std::unique_ptr<HloModule>> HloTestBase::MakeReferenceModule(
@@ -1097,9 +1096,9 @@ HloComputation* HloTestBase::FindComputation(HloModule* module,
 HloInstruction* HloTestBase::FindInstruction(HloModule* module,
                                              absl::string_view name) {
   for (const HloComputation* computation : module->computations()) {
-    if (auto instruction = hlo_query::FindFirstInstruction(computation, name);
-        instruction.first != nullptr) {
-      return instruction.first;
+    if (HloInstruction* instruction =
+            hlo_query::FindInstruction(computation, name)) {
+      return instruction;
     }
   }
   return nullptr;
@@ -1108,9 +1107,9 @@ HloInstruction* HloTestBase::FindInstruction(HloModule* module,
 HloInstruction* HloTestBase::FindInstruction(HloModule* module,
                                              HloOpcode opcode) {
   for (const HloComputation* computation : module->computations()) {
-    if (auto instruction = hlo_query::FindFirstInstruction(computation, opcode);
-        instruction.first != nullptr) {
-      return instruction.first;
+    if (HloInstruction* instruction =
+            hlo_query::FindInstruction(computation, opcode)) {
+      return instruction;
     }
   }
   return nullptr;

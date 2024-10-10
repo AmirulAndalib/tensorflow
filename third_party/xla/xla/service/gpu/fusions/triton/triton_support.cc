@@ -107,6 +107,11 @@ absl::flat_hash_set<HloOpcode> TritonSupportedUnaryElementwiseOps(
                                                       HloOpcode::kCeil};
     ret.insert(additional_opcodes.begin(), additional_opcodes.end());
   }
+
+  if (primitive_util::IsFloatingPointType(element_type)) {
+    ret.insert(HloOpcode::kReducePrecision);
+  }
+
   return ret;
 }
 
@@ -317,9 +322,13 @@ CodegenDecision IsTritonSupportedInstructionImpl(
     case HloOpcode::kTranspose:
     case HloOpcode::kParameter:
     case HloOpcode::kBroadcast:
-    case HloOpcode::kBitcast:
-    case HloOpcode::kReshape:
       return CodegenDecision::Allow();
+    case HloOpcode::kBitcast:
+
+    case HloOpcode::kReshape:
+      return (instr.shape().rank() == 0 && instr.operand(0)->shape().rank() > 0)
+                 ? CodegenDecision::Forbid("0D reshapes are not yet supported.")
+                 : CodegenDecision::Allow();
     default:
       VLOG(2) << "Unsupported instruction: " << instr.ToString();
       break;
@@ -421,6 +430,20 @@ CodegenDecision IsTritonSupportedInstruction(
   VLOG(2) << "IsTritonSupportedInstruction: " << instr.ToString() << " "
           << bool(decision);
   return decision;
+}
+
+CodegenDecision IsTritonSupportedComputation(
+    const HloComputation& computation,
+    const se::GpuComputeCapability& gpu_compute_capability) {
+  for (const auto* instruction : computation.instructions()) {
+    if (CodegenDecision can_codegen =
+            IsTritonSupportedInstruction(*instruction, gpu_compute_capability);
+        !can_codegen) {
+      return can_codegen;
+    }
+  }
+
+  return CodegenDecision::Allow();
 }
 
 bool IsTritonFusedComputation(const HloComputation& computation) {
