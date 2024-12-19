@@ -27,7 +27,6 @@ limitations under the License.
 #include <ostream>
 #include <set>
 #include <string>
-#include <string_view>
 #include <tuple>
 #include <utility>
 #include <variant>
@@ -8371,7 +8370,7 @@ ENTRY main {
   Options options = DefaultMemorySpaceOptions();
   options.position_requires_contiguous_allocation_fn =
       [](const HloPosition& position) {
-        std::string_view inst_name = position.instruction->name();
+        absl::string_view inst_name = position.instruction->name();
         if (inst_name == "fusion1" ||
             (inst_name == "fusion2" && position.index != ShapeIndex({0}))) {
           return true;
@@ -8477,7 +8476,7 @@ ENTRY main {
   Options options = DefaultMemorySpaceOptions();
   options.position_requires_contiguous_allocation_fn =
       [](const HloPosition& position) {
-        std::string_view inst_name = position.instruction->name();
+        absl::string_view inst_name = position.instruction->name();
         if (inst_name == "fusion1" ||
             (inst_name == "fusion2" && position.index != ShapeIndex({0}))) {
           return true;
@@ -8599,7 +8598,7 @@ ENTRY main {
   Options options = DefaultMemorySpaceOptions();
   options.position_requires_contiguous_allocation_fn =
       [](const HloPosition& position) {
-        std::string_view inst_name = position.instruction->name();
+        absl::string_view inst_name = position.instruction->name();
         if (inst_name == "fusion1" ||
             (inst_name == "fusion2" && position.index != ShapeIndex({0})) ||
             (inst_name == "fusion3" && position.index != ShapeIndex({0}))) {
@@ -10296,6 +10295,75 @@ TEST_F(MemorySpaceAssignmentTest, CrossProgramPrefetchTupleNoReuse) {
   EXPECT_TRUE(has_zero_offset_allocations);
 }
 
+TEST_F(MemorySpaceAssignmentTest,
+       CrossProgramPrefetchEndOfProgramPrefetchAndWhile) {
+  absl::string_view hlo_string = R"(
+  HloModule cross_program_prefetch, is_scheduled=true
+
+  while_condition {
+    param1 = (f32[8,2]{1,0}, f32[8,2]{1,0}) parameter(0)
+    ROOT cond = pred[] constant(true)
+  }
+
+  while_body {
+    param2 = (f32[8,2]{1,0}, f32[8,2]{1,0}) parameter(0)
+    gte2 = f32[8,2]{1,0} get-tuple-element(param2), index=0
+    gte3 = f32[8,2]{1,0} get-tuple-element(param2), index=1
+    add = f32[8,2]{1,0} add(gte2, gte3)
+    negate.2 = f32[8,2]{1,0} negate(add)
+    negate.3 = f32[8,2]{1,0} negate(negate.2)
+    negate.4 = f32[8,2]{1,0} negate(negate.3)
+    negate.5 = f32[8,2]{1,0} negate(negate.4)
+    negate.6 = f32[8,2]{1,0} negate(negate.5)
+    negate.7 = f32[8,2]{1,0} negate(negate.6)
+    negate.8 = f32[8,2]{1,0} negate(negate.7)
+    ROOT tuple2 = (f32[8,2]{1,0}, f32[8,2]{1,0}) tuple(negate.8, gte3)
+  }
+
+  ENTRY CrossProgramPrefetch {
+    p0 = f32[8,8]{1,0} parameter(0)
+    p1 = f32[8,2]{1,0} parameter(1)
+    dot = f32[8,2]{1,0} dot(p0, p1), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+    negate.1 = f32[8,2]{1,0} negate(dot)
+    tuple = (f32[8,2]{1,0}, f32[8,2]{1,0}) tuple(negate.1, dot)
+    while = (f32[8,2]{1,0}, f32[8,2]{1,0}) while(tuple), condition=while_condition, body=while_body
+    ROOT gte0 = f32[8,2]{1,0} get-tuple-element(while), index=0
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+  auto preset_assignments = AssignMemorySpaceUsingCostAnalysis(module.get());
+
+  auto cross_program_prefetches = module->CrossProgramPrefetches();
+  EXPECT_EQ(cross_program_prefetches.size(), 1);
+  EXPECT_EQ(cross_program_prefetches[0].parameter, 1);
+  EXPECT_EQ(cross_program_prefetches[0].index, ShapeIndex({}));
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<HloDataflowAnalysis> dataflow_analysis,
+      HloDataflowAnalysis::Run(*module));
+  LOG(ERROR) << "module: " << module->ToString();
+  const HloValue& cross_program_prefetched_value =
+      dataflow_analysis->GetValueDefinedAt(
+          module->entry_computation()->parameter_instruction(1), {});
+  // Expect that there are two prefetches that use this value, one is the
+  // cross-program prefetch, the other is the end-of-program prefetch.
+  auto is_cross_program_prefetch = [](const HloUse& use) {
+    return use.instruction->opcode() == HloOpcode::kCopyStart &&
+           use.instruction->cross_program_prefetch_index().has_value();
+  };
+  EXPECT_EQ(absl::c_count_if(cross_program_prefetched_value.GetUses(),
+                             is_cross_program_prefetch),
+            1);
+  auto is_end_of_program_prefetch = [](const HloUse& use) {
+    return use.instruction->opcode() == HloOpcode::kCopyStart &&
+           !use.instruction->cross_program_prefetch_index().has_value();
+  };
+  EXPECT_EQ(absl::c_count_if(cross_program_prefetched_value.GetUses(),
+                             is_end_of_program_prefetch),
+            1);
+}
+
 TEST_F(MemorySpaceAssignmentTest, CrossProgramPrefetchReuse) {
   // This tests the scenario that the cross-program-prefetched buffer is used
   // again close to the end of the computation. In this case, it is better not
@@ -10498,7 +10566,7 @@ ENTRY entry {
 // - Test: prefetch p1, after p0 is unallocated from alternate memory (after
 //   instruction c).
 TEST_F(MemorySpaceAssignmentTest, CopyResourceIntegration) {
-  std::string_view hlo_string = R"(
+  absl::string_view hlo_string = R"(
 HloModule module, is_scheduled=true
 
 ENTRY main {
@@ -10587,7 +10655,7 @@ ENTRY main {
   // Check the schedule
   const std::vector<HloInstruction*>& schedule =
       module->schedule().sequence(module->entry_computation()).instructions();
-  auto find_schedule_index = [&schedule](std::string_view name) -> int {
+  auto find_schedule_index = [&schedule](absl::string_view name) -> int {
     for (int i = 0; i < schedule.size(); ++i) {
       if (schedule[i]->name() == name) {
         return i;
@@ -10879,7 +10947,7 @@ class SlicedPrefetchTest : public MemorySpaceAssignmentTestBase {
 
     static bool MatchMemorySpace(const HloInstruction* instruction,
                                  int64_t expected_memory_space,
-                                 std::string_view error_message_identifier,
+                                 absl::string_view error_message_identifier,
                                  ::testing::MatchResultListener* listener) {
       if (!instruction->shape().has_layout()) {
         *listener << " contains " << error_message_identifier << " named "
@@ -11036,7 +11104,7 @@ class SlicedPrefetchTest : public MemorySpaceAssignmentTestBase {
 
   // Returns the index of the first instruction with the given name.
   static absl::StatusOr<int> FindScheduleIndexOfInstruction(
-      const std::vector<HloInstruction*>& schedule, std::string_view name,
+      const std::vector<HloInstruction*>& schedule, absl::string_view name,
       InstructionClass c) {
     for (int i = 0; i < schedule.size(); ++i) {
       if (schedule[i]->name() == name) {
@@ -11052,7 +11120,7 @@ class SlicedPrefetchTest : public MemorySpaceAssignmentTestBase {
 
   // Returns a scheduled instruction with the specified name or null.
   static const HloInstruction* FindNamedScheduledInstruction(
-      const HloModule& module, std::string_view name) {
+      const HloModule& module, absl::string_view name) {
     for (const HloInstruction* i : module.entry_computation()->instructions()) {
       if (i->name() == name) {
         return i;
@@ -11307,8 +11375,8 @@ class SlicedPrefetchTest : public MemorySpaceAssignmentTestBase {
   // - concat_bitcast comes after all slice dones AND
   static absl::Status CheckSchedule(
       const HloModule& module, const HloInstruction* concat_bitcast,
-      std::string_view slices_start_after_instruction_name,
-      std::string_view slices_done_before_instruction_name,
+      absl::string_view slices_start_after_instruction_name,
+      absl::string_view slices_done_before_instruction_name,
       bool expect_slices_started_at_different_times) {
     CHECK(concat_bitcast->IsCustomCall(kConcatBitcastCustomCall));
 
@@ -12291,8 +12359,8 @@ ENTRY main {
   // A lambda for generating HLO with 2 while loops called back to back. The
   // first while loop will execute while_computation1 and the second while loop
   // will execute while_computation2.
-  auto gen_hlo = [&](std::string_view while_computation1,
-                     std::string_view while_computation2) {
+  auto gen_hlo = [&](absl::string_view while_computation1,
+                     absl::string_view while_computation2) {
     return absl::StrReplaceAll(
         module_text,
         {
@@ -12333,7 +12401,7 @@ ENTRY main {
   // Define a lambda for running MSA on the specified HLO, with the
   // configuration above.
   auto run_msa =
-      [&](std::string_view hlo_text) -> absl::StatusOr<ModuleAndAssignments> {
+      [&](absl::string_view hlo_text) -> absl::StatusOr<ModuleAndAssignments> {
     ModuleAndAssignments module_and_assignments;
     TF_ASSIGN_OR_RETURN(module_and_assignments.module,
                         ParseAndReturnVerifiedModule(hlo_text));
