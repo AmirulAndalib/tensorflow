@@ -257,18 +257,14 @@ cc_library(
 
 cc_library(
     name = "source_target_pairs",
-    srcs = ["source_target_pairs.cc"],
     hdrs = ["source_target_pairs.h"],
     deps = [
         "//xla:util",
         "//xla:xla_data_proto_cc",
         "//xla/hlo/parser:hlo_parser",
-        "//xla/service/graphcycles",
         "//xla/tsl/platform:statusor",
-        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:inlined_vector",
         "@com_google_absl//absl/log:check",
-        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
     ],
@@ -289,12 +285,48 @@ xla_cc_test(
 )
 
 cc_library(
+    name = "collective_permute_cycle",
+    srcs = ["collective_permute_cycle.cc"],
+    hdrs = ["collective_permute_cycle.h"],
+    deps = [
+        ":source_target_pairs",
+        "//xla:util",
+        "//xla:xla_data_proto_cc",
+        "//xla/hlo/parser:hlo_parser",
+        "//xla/service/graphcycles",
+        "//xla/tsl/platform:statusor",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+    ],
+)
+
+xla_cc_test(
+    name = "collective_permute_cycle_test",
+    srcs = ["collective_permute_cycle_test.cc"],
+    deps = [
+        ":collective_permute_cycle",
+        ":source_target_pairs",
+        "//xla:shape_util",
+        "//xla/hlo/ir:hlo",
+        "@com_google_googletest//:gtest_main",
+        "@local_tsl//tsl/platform:status_matchers",
+        "@local_tsl//tsl/platform:test",
+    ],
+)
+
+cc_library(
     name = "collective_permute_decomposer",
     srcs = ["collective_permute_decomposer.cc"],
     hdrs = ["collective_permute_decomposer.h"],
     deps = [
         ":call_graph",
+        ":collective_conflict_analysis",
         ":collective_ops_utils",
+        ":collective_permute_cycle",
         ":pattern_matcher",
         ":source_target_pairs",
         "//xla:shape_util",
@@ -330,6 +362,20 @@ xla_cc_test(
         "@com_google_absl//absl/strings:string_view",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "collective_conflict_analysis",
+    srcs = ["collective_conflict_analysis.cc"],
+    hdrs = ["collective_conflict_analysis.h"],
+    deps = [
+        ":collective_ops_utils",
+        "//xla/hlo/ir:hlo",
+        "//xla/hlo/parser:hlo_parser",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
     ],
 )
 
@@ -4639,7 +4685,6 @@ cc_library(
     hdrs = ["hlo_runner_interface.h"],
     deps = [
         ":computation_placer",
-        ":executable",
         ":hlo_module_config",
         "//xla:literal",
         "//xla:shape_util",
@@ -4652,6 +4697,8 @@ cc_library(
         "//xla/tsl/platform:statusor",
         "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:die_if_null",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
@@ -5537,6 +5584,7 @@ cc_library(
     srcs = ["collective_ops_utils.cc"],
     hdrs = ["collective_ops_utils.h"],
     deps = [
+        ":collective_permute_cycle",
         ":computation_placer",
         ":global_device_id",
         ":pattern_matcher",
@@ -5575,10 +5623,10 @@ xla_cc_test(
     srcs = ["collective_ops_utils_test.cc"],
     deps = [
         ":collective_ops_utils",
+        ":collective_permute_cycle",
         ":computation_placer",
         ":global_device_id",
         ":hlo_module_config",
-        ":source_target_pairs",
         "//xla:array2d",
         "//xla:literal_util",
         "//xla:shape_util",
